@@ -294,13 +294,12 @@ kbd { font: inherit; font-size: 11px; border: 1px solid var(--line-strong); bord
           </div>
         </div>
       </div>
-      <div class="canvas-box"><canvas id="cv" aria-label="Isometric view of the cluster: the router on the left sends requests to eight GPU slabs; squares on each slab are requests being processed, towers are waiting requests"></canvas></div>
+      <div class="canvas-box"><canvas id="cv" aria-label="Cluster flow: requests wait in the router queue, the router sends each one to a GPU, it waits in that GPU's lane, then runs in the GPU's batch"></canvas></div>
       <div class="stage-foot">
         <div class="legend">
           <span><i style="background:var(--rule)"></i>sent by a rule</span>
           <span><i style="background:var(--violet)"></i>sent by the model</span>
           <span><i style="background:var(--late)"></i>past deadline</span>
-          <span><i style="background:var(--ink-2)"></i>tower = waiting</span>
           <span>squares fill as answers are generated</span>
         </div>
         <span class="meta num" id="clock"></span>
@@ -723,7 +722,7 @@ const SCEN = {
     name: 'High load', code: 'Load 0.9', tile: 'peach', cluster: 'mixed', load: 0.90, cost: 0.47, slow: null,
     q: 'What happens close to full load?',
     watch: ['Requests now arrive at 90% of what the cluster can handle.',
-      'ECT and always-predictive send each request to the GPU that would finish it first. The H100 towers grow, and later requests wait behind them.'],
+      'ECT and always-predictive send each request to the GPU that would finish it first. The waiting lanes in front of the H100s grow, and later requests wait behind them.'],
     paper: 'Missed deadlines at load 0.9: WLC 6.8%, always-predictive 39.4%, ECT 35.3%, adaptive 14.5%.',
   },
   s8: {
@@ -1022,11 +1021,10 @@ function routerUtil(s) {
   return b[0] - a[0] > 0.05 ? Math.min((b[1] - a[1]) / (b[0] - a[0]), 1) : 0;
 }
 
-// ------------------------------------------------------- isometric cluster
+// ------------------------------------------------------- cluster flow view
+// Left to right: router queue -> router -> waiting lane -> GPU card (running batch).
 const cv = $('cv'), cx = cv.getContext('2d');
 const ch = $('ch'), chx = ch.getContext('2d');
-const IA = Math.cos(Math.PI / 6), IB = 0.5;
-const SW = 112, SD = 60, GX = 40, GY = 64, T = 9, COLS = 4, PITCH = 6;
 function fit(canvas) {
   const r = canvas.getBoundingClientRect(), dpr = Math.min(window.devicePixelRatio || 1, 2);
   const w = Math.round(r.width * dpr), h = Math.round(r.height * dpr);
@@ -1039,170 +1037,159 @@ function rr(ctx, x, y, w, h, r) {
   ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
 }
 const font = (px, w = 600) => `${w} ${px}px ${C.font || 'monospace'}`;
+function card(x, y, w, h, r, fill, stroke, lw = 1.5) {
+  cx.fillStyle = C.drop; rr(cx, x + 1.5, y + 2.5, w, h, r); cx.fill();
+  cx.fillStyle = fill; rr(cx, x, y, w, h, r); cx.fill();
+  cx.strokeStyle = stroke; cx.lineWidth = lw; cx.stroke();
+}
+function heading(text, x, y, align = 'left') {
+  cx.font = font(11, 700); cx.fillStyle = C.muted; cx.textAlign = align;
+  if ('letterSpacing' in cx) cx.letterSpacing = '0.06em';
+  cx.fillText(text, x, y);
+  if ('letterSpacing' in cx) cx.letterSpacing = '0px';
+}
 
 function drawScene(now) {
   const [W, H, dpr] = fit(cv);
-  const s = viewSim(), n = s.workers.length, ROWS = Math.ceil(n / COLS);
-  const lay = s.workers.map((w, i) => ({ x: (i % COLS) * (SW + GX), y: Math.floor(i / COLS) * (SD + GY) }));
-  const totY = ROWS * SD + (ROWS - 1) * GY;
-  const R = { x: -170, y: totY / 2 - 30, w: 60, d: 60 };
-  const x0 = R.x, x1 = COLS * (SW + GX) - GX, y0 = 0, y1 = totY;
-  const us = [x0 - y1, x1 - y0].map(v => v * IA), vs = [(x0 + y0) * IB, (x1 + y1) * IB];
-  const top = 64, bot = 48;
-  const k = Math.min((W - 30) / (us[1] - us[0]), (H - top - bot) / (vs[1] - vs[0]), 1.5);
-  const ox = W / 2 - k * (us[0] + us[1]) / 2;
-  const oy = top + (H - top - bot - k * (vs[1] - vs[0])) / 2 - k * vs[0];
-  const P = (x, y) => [ox + k * (x - y) * IA, oy + k * (x + y) * IB];
-  const iso = () => cx.setTransform(dpr * k * IA, dpr * k * IB, -dpr * k * IA, dpr * k * IB, dpr * ox, dpr * oy);
-  const scr = () => cx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  scr();
+  cx.setTransform(dpr, 0, 0, dpr, 0, 0);
   cx.clearRect(0, 0, W, H);
+  const s = viewSim(), n = s.workers.length, small = W < 640;
 
-  // floor grid, faded towards the edges
-  iso();
-  cx.strokeStyle = C['line']; cx.lineWidth = 1 / k;
-  cx.beginPath();
-  for (let x = -360; x <= 800; x += 24) { cx.moveTo(x, -240); cx.lineTo(x, totY + 240); }
-  for (let y = -240; y <= totY + 240; y += 24) { cx.moveTo(-360, y); cx.lineTo(800, y); }
-  cx.stroke();
-  scr();
-  const [gx, gy] = P((x0 + x1) / 2, totY / 2);
-  const g = cx.createRadialGradient(gx, gy, Math.min(W, H) * 0.22, gx, gy, Math.max(W, H) * 0.62);
-  g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,1)');
-  cx.globalCompositeOperation = 'destination-out';
-  cx.fillStyle = g; cx.fillRect(0, 0, W, H);
-  cx.globalCompositeOperation = 'source-over';
+  // ---- layout
+  const top = 30, bottom = 4, bodyH = H - top - bottom, rowH = bodyH / n;
+  const qX = 4, qW = small ? 40 : 74;
+  const rS = small ? 64 : 92, rH = small ? 48 : 66, rX = qX + qW + (small ? 12 : 26), rY = top + bodyH / 2 - rH / 2;
+  const laneX = rX + rS + (small ? 18 : 48), laneW = small ? 42 : 104;
+  const cardX = laneX + laneW + (small ? 6 : 10), cardW = W - cardX - 4;
+  const hdrW = small ? 46 : 96;
+  const pitch = Math.max(3, Math.min(Math.floor((cardW - hdrW - 14) / 32), Math.floor((rowH - 14) / 4), 9));
+  const rowY = i => top + i * rowH + rowH / 2;
+  const laneEnd = rX + rS;
 
-  // paths from router to GPUs
-  const rc = [R.x + R.w / 2, R.y + R.d / 2];
-  iso();
-  cx.strokeStyle = C['line-strong']; cx.lineWidth = 1.3 / k; cx.setLineDash([5 / k, 5 / k]);
-  for (const L of lay) { cx.beginPath(); cx.moveTo(rc[0], rc[1]); cx.lineTo(L.x + SW / 2, L.y + SD / 2); cx.stroke(); }
+  // ---- column headings
+  heading('QUEUE', qX + qW / 2, 16, 'center');
+  heading('ROUTER', rX + rS / 2, 16, 'center');
+  heading(small ? 'WAIT' : 'WAITING', laneX + laneW / 2, 16, 'center');
+  heading(small ? 'RUN' : 'RUNNING ON GPU · up to 128 at once', cardX + 2, 16);
+
+  // ---- connectors router -> each waiting lane
+  cx.strokeStyle = C['line-strong']; cx.lineWidth = 1.2; cx.setLineDash([4, 4]);
+  for (let i = 0; i < n; i++) {
+    const y = rowY(i);
+    cx.beginPath(); cx.moveTo(laneEnd, rY + rH / 2);
+    cx.bezierCurveTo(laneEnd + (laneX - laneEnd) * 0.55, rY + rH / 2, laneX - (laneX - laneEnd) * 0.45, y, laneX, y);
+    cx.stroke();
+  }
   cx.setLineDash([]);
 
-  const poly = (pts, fill, stroke, lw = 1.2) => {
-    cx.beginPath(); pts.forEach((p, i) => (i ? cx.lineTo(p[0], p[1]) : cx.moveTo(p[0], p[1]))); cx.closePath();
-    if (fill) { cx.fillStyle = fill; cx.fill(); }
-    if (stroke) { cx.strokeStyle = stroke; cx.lineWidth = lw; cx.lineJoin = 'round'; cx.stroke(); }
-  };
-  const slab = (x, y, w, d, t, topFill, stroke) => {
-    scr();
-    const A = P(x, y), B = P(x + w, y), Cc = P(x + w, y + d), D = P(x, y + d);
-    const dn = p => [p[0], p[1] + t];
-    cx.save();
-    cx.shadowColor = 'rgba(40,25,10,0.16)'; cx.shadowBlur = 18; cx.shadowOffsetY = 8;
-    poly([A, B, dn(B), dn(Cc), dn(D), D], C['slab-side'], null);
-    cx.restore();
-    poly([B, Cc, dn(Cc), dn(B)], C['slab-side'], stroke);
-    poly([Cc, D, dn(D), dn(Cc)], C['slab-side-2'], stroke);
-    poly([A, B, Cc, D], topFill, stroke);
-  };
-  const tower = (x, y, h, fill, side, stroke) => {
-    if (h <= 0) return;
-    scr();
-    const s2 = 10, A = P(x, y), B = P(x + s2, y), Cc = P(x + s2, y + s2), D = P(x, y + s2);
-    const up = p => [p[0], p[1] - h];
-    poly([B, Cc, up(Cc), up(B)], side, stroke, 1);
-    poly([Cc, D, up(D), up(Cc)], fill, stroke, 1);
-    poly([up(A), up(B), up(Cc), up(D)], C['raised'], stroke, 1);
-  };
-  const small = W < 640;
-  const pill = (text, x, y, bg, fg, border) => {
-    scr();
-    cx.font = font(small ? 10 : 11, 600);
-    const w = cx.measureText(text).width + (small ? 12 : 18), h = small ? 17 : 20, xa = x - w / 2, ya = y - h / 2;
-    cx.fillStyle = C.drop; rr(cx, xa + 1.5, ya + 2.5, w, h, 10); cx.fill();
-    cx.fillStyle = bg; rr(cx, xa, ya, w, h, 10); cx.fill();
-    cx.strokeStyle = border; cx.lineWidth = 1.5; cx.stroke();
-    cx.fillStyle = fg; cx.textAlign = 'center'; cx.textBaseline = 'middle';
-    cx.fillText(text, x, y + 0.5);
-    cx.textBaseline = 'alphabetic';
-  };
+  // ---- router queue (requests not yet decided)
+  const q = s.rq.length;
+  cx.strokeStyle = q > 20 ? C.late : C['line-strong']; cx.lineWidth = 1.2; cx.setLineDash([3, 3]);
+  rr(cx, qX, top + 4, qW, bodyH - 8, 10); cx.stroke(); cx.setLineDash([]);
+  cx.font = font(small ? 16 : 22, 800); cx.fillStyle = q > 20 ? C.late : C.ink; cx.textAlign = 'center';
+  cx.fillText(String(q), qX + qW / 2, top + (small ? 26 : 32));
+  cx.font = font(11, 400); cx.fillStyle = C.muted;
+  cx.fillText(small ? 'wait' : 'to decide', qX + qW / 2, top + (small ? 40 : 48));
+  const dCols = Math.max(2, Math.floor((qW - 10) / 9)), dMax = dCols * Math.floor((bodyH - 80) / 9);
+  for (let k = 0; k < Math.min(q, dMax); k++) {
+    const c = k % dCols, r = Math.floor(k / dCols);
+    cx.fillStyle = C['ink-2'];
+    cx.fillRect(qX + (qW - dCols * 9) / 2 + c * 9 + 1, top + bodyH - 14 - r * 9, 7, 7);
+  }
 
-  // router
+  // ---- router card
   const thinking = s.rCur && s.rCur.model;
-  slab(R.x, R.y, R.w, R.d, T + 4, thinking ? C['violet-tile'] : C['slab-top'], C['ink-2']);
-  iso();
-  cx.strokeStyle = thinking ? C.violet : C['ink-2']; cx.lineWidth = 1.4 / k;
-  cx.beginPath(); cx.arc(rc[0], rc[1], 16, 0, 7); cx.stroke();
-  cx.beginPath(); cx.moveTo(rc[0] - 8, rc[1]); cx.lineTo(rc[0] + 8, rc[1]); cx.moveTo(rc[0], rc[1] - 8); cx.lineTo(rc[0], rc[1] + 8); cx.stroke();
   if (!reduceMotion && thinking && s.rCur !== lastPulseReq && st.playing) {
     lastPulseReq = s.rCur;
     if (!pulses.length || now - pulses[pulses.length - 1] > 140) pulses.push(now);
   }
   pulses = pulses.filter(t0 => now - t0 < 600);
   for (const t0 of pulses) {
-    const t = (now - t0) / 600;
-    iso(); cx.strokeStyle = C.violet; cx.lineWidth = 2 / k; cx.globalAlpha = 0.7 * (1 - t);
-    cx.beginPath(); cx.arc(rc[0], rc[1], 34 + 30 * t, 0, 7); cx.stroke();
+    const t = (now - t0) / 600, g = 4 + 14 * t;
+    cx.strokeStyle = C.violet; cx.lineWidth = 2; cx.globalAlpha = 0.7 * (1 - t);
+    rr(cx, rX - g, rY - g, rS + 2 * g, rH + 2 * g, 12 + g); cx.stroke();
     cx.globalAlpha = 1;
   }
-  const q = s.rq.length;
-  tower(R.x + 4, R.y + 4, Math.min(q, 120) * 0.9 * Math.max(k, 0.6), C['ink-2'], C['ink'], C['ink']);
+  card(rX, rY, rS, rH, 12, thinking ? C['violet-tile'] : C.green, C.ink);
+  cx.textAlign = 'center'; cx.fillStyle = C.ink;
+  cx.font = font(small ? 10 : 12, 800);
+  cx.fillText(thinking ? 'asks model' : 'router', rX + rS / 2, rY + rH / 2 - (small ? 2 : 4));
+  cx.font = font(small ? 10 : 11, 500); cx.fillStyle = C['ink-2'];
+  cx.fillText(POL[st.view].name, rX + rS / 2, rY + rH / 2 + (small ? 10 : 12));
 
-  // GPUs, back to front
-  const order = lay.map((L, i) => i).sort((a, b) => (lay[a].x + lay[a].y) - (lay[b].x + lay[b].y));
-  for (const i of order) {
-    const L = lay[i], w = s.workers[i], slowed = w.phi > 1;
-    slab(L.x, L.y, SW, SD, T, slowed ? C['amber-tile'] : C['slab-top'], slowed ? C.amber : C['ink-2']);
-    iso();
-    const hit = hits[i] ? 1 - (now - hits[i].t) / 400 : 0;
-    if (hit > 0) { cx.fillStyle = hits[i].model ? C.violet : C.ink; cx.globalAlpha = 0.12 * hit; cx.fillRect(L.x, L.y, SW, SD); cx.globalAlpha = 1; }
-    const cs = PITCH - 1.3;
-    for (let kk = 0; kk < 128; kk++) {
-      const x = L.x + 8 + (kk % 16) * PITCH, y = L.y + 6 + Math.floor(kk / 16) * PITCH;
-      const r = w.slots[kk];
-      if (!r) { cx.fillStyle = C['line-soft']; cx.fillRect(x, y, cs, cs); continue; }
+  // ---- GPU rows
+  for (let i = 0; i < n; i++) {
+    const w = s.workers[i], y = rowY(i), slowed = w.phi > 1;
+    // waiting lane: next request on the right, newest on the left
+    const nq = w.waiting.length, sq = small ? 6 : 8, gap = 2, cap = Math.floor((laneW - 6) / (sq + gap));
+    cx.fillStyle = C['line-soft']; rr(cx, laneX, y - sq / 2 - 3, laneW, sq + 6, 4); cx.fill();
+    if (nq > 64) { cx.strokeStyle = C.late; cx.lineWidth = 1.2; cx.stroke(); }
+    for (let k = 0; k < Math.min(nq, cap); k++) {
+      const r = w.waiting[k];
       cx.fillStyle = s.now > r.deadline ? C.late : (r.model ? C.violet : C.rule);
-      cx.globalAlpha = 0.32; cx.fillRect(x, y, cs, cs); cx.globalAlpha = 1;
+      cx.fillRect(laneX + laneW - 3 - (k + 1) * (sq + gap) + gap, y - sq / 2, sq, sq);
+    }
+    if (nq) {
+      cx.font = font(11, 700); cx.fillStyle = nq > 64 ? C.late : C.ink; cx.textAlign = 'center';
+      cx.fillText(nq > cap ? `${nq} (+${nq - cap})` : String(nq), laneX + laneW / 2, y - sq / 2 - 6);
+    }
+    // arrow into the card
+    cx.fillStyle = C['line-strong'];
+    cx.beginPath(); cx.moveTo(cardX - 1, y); cx.lineTo(cardX - 6, y - 4); cx.lineTo(cardX - 6, y + 4); cx.fill();
+
+    // GPU card
+    const ch2 = rowH - 6, cy0 = y - ch2 / 2;
+    card(cardX, cy0, cardW - 2, ch2, 8, slowed ? C['amber-tile'] : C.raised, slowed ? C.amber : C['ink-2'], 1.2);
+    const hit = hits[i] ? 1 - (now - hits[i].t) / 400 : 0;
+    if (hit > 0) { cx.fillStyle = hits[i].model ? C.violet : C.ink; cx.globalAlpha = 0.1 * hit; rr(cx, cardX, cy0, cardW - 2, ch2, 8); cx.fill(); cx.globalAlpha = 1; }
+    cx.textAlign = 'left'; cx.fillStyle = C.ink; cx.font = font(small ? 11 : 13, 800);
+    cx.fillText(w.p.name, cardX + 8, y - (small ? 1 : 2));
+    cx.font = font(11, slowed ? 700 : 400); cx.fillStyle = slowed ? C.amber : C.muted;
+    cx.fillText(slowed ? (small ? '3× slow' : '3× slower') : `${w.p.speed.toFixed(2)}×${small ? '' : ' speed'}`, cardX + 8, y + (small ? 11 : 13));
+    // running batch
+    const gx = cardX + hdrW, gy = y - pitch * 2, cs = pitch - 1;
+    for (let k = 0; k < 128; k++) {
+      const x = gx + (k % 32) * pitch, yy = gy + Math.floor(k / 32) * pitch;
+      const r = w.slots[k];
+      if (!r) { cx.fillStyle = C['line-soft']; cx.fillRect(x, yy, cs, cs); continue; }
+      cx.fillStyle = s.now > r.deadline ? C.late : (r.model ? C.violet : C.rule);
+      cx.globalAlpha = 0.32; cx.fillRect(x, yy, cs, cs); cx.globalAlpha = 1;
       const f = Math.min(1, Math.max(0.15, r.gen / r.out));
-      cx.fillRect(x, y + cs * (1 - f), cs, cs * f);
+      cx.fillRect(x, yy + cs * (1 - f), cs, cs * f);
     }
     for (const fl of flashes) {
       if (fl.w !== i) continue;
       const a = 1 - (now - fl.t0) / 500;
       if (a <= 0) continue;
-      const x = L.x + 8 + (fl.slot % 16) * PITCH, y = L.y + 6 + Math.floor(fl.slot / 16) * PITCH;
-      cx.strokeStyle = fl.late ? C.late : C.ink; cx.globalAlpha = a; cx.lineWidth = 1.2 / k;
-      cx.strokeRect(x - 0.6, y - 0.6, cs + 1.2, cs + 1.2);
+      const x = gx + (fl.slot % 32) * pitch, yy = gy + Math.floor(fl.slot / 32) * pitch;
+      cx.strokeStyle = fl.late ? C.late : C.ink; cx.globalAlpha = a; cx.lineWidth = 1.2;
+      cx.strokeRect(x - 0.5, yy - 0.5, cs + 1, cs + 1);
       cx.globalAlpha = 1;
     }
-    const nq = w.waiting.length;
-    const th = Math.min(nq, 120) * 0.9 * Math.max(k, 0.6);
-    tower(L.x + 3, L.y + 3, th, nq > 64 ? C.late : C['ink-2'], nq > 64 ? C['late-tile'] : C.ink, C.ink);
-    if (nq) {
-      const [tx, ty] = P(L.x + 8, L.y + 8);
-      scr(); cx.font = font(10, 700); cx.fillStyle = nq > 64 ? C.late : C.ink; cx.textAlign = 'center';
-      cx.fillText(String(nq), tx, ty - th - 8);
+    const used = w.running.length + w.newb.length, rest = cardX + cardW - 2 - (gx + 32 * pitch);
+    if (rest > 70) {
+      cx.textAlign = 'right'; cx.font = font(11, 600); cx.fillStyle = C.ink;
+      cx.fillText(`${used} running`, cardX + cardW - 12, y + 4);
     }
   }
 
-  // requests flying from the router (with a small hop)
-  const life = 700;
+  // ---- requests travelling from the router to a waiting lane
+  const life = 650;
   flashes = flashes.filter(f => now - f.t0 < 500);
   particles = particles.filter(p => { if (now - p.t0 < life) return true; hits[p.w] = { t: now, model: p.model }; return false; });
-  scr();
   for (const p of particles) {
-    const L = lay[p.w], t = (now - p.t0) / life;
+    const t = (now - p.t0) / life, y1 = rowY(p.w), y0 = rY + rH / 2;
     cx.fillStyle = p.model ? C.violet : C['ink-2'];
     for (let j = 3; j >= 0; j--) {
-      const tt = Math.min(Math.max(t - j * 0.05, 0), 1), e = 1 - Math.pow(1 - tt, 3);
-      const [sx, sy] = P(rc[0] + (L.x + SW / 2 - rc[0]) * e, rc[1] + (L.y + SD / 2 - rc[1]) * e);
+      const tt = Math.min(Math.max(t - j * 0.05, 0), 1), e = 1 - Math.pow(1 - tt, 3), u = 1 - e;
+      const c1x = laneEnd + (laneX - laneEnd) * 0.55, c2x = laneX - (laneX - laneEnd) * 0.45;
+      const bx = u * u * u * laneEnd + 3 * u * u * e * c1x + 3 * u * e * e * c2x + e * e * e * laneX;
+      const by = u * u * u * y0 + 3 * u * u * e * y0 + 3 * u * e * e * y1 + e * e * e * y1;
       cx.globalAlpha = j ? 0.16 * (4 - j) / 3 : 1;
-      cx.beginPath(); cx.arc(sx, sy - 14 * Math.sin(Math.PI * e) - 4, j ? 3 : 4, 0, 7); cx.fill();
+      cx.beginPath(); cx.arc(bx, by, j ? 3 : 4, 0, 7); cx.fill();
     }
     cx.globalAlpha = 1;
   }
-
-  // labels: a name plate on each slab's front-left edge
-  for (let i = 0; i < n; i++) {
-    const L = lay[i], w = s.workers[i], slowed = w.phi > 1;
-    const [px, py] = P(L.x + SW / 2, L.y + SD);
-    const txt = small ? (slowed ? `${w.p.name} slow` : w.p.name) : (slowed ? `${w.p.name} · 3× slower` : `${w.p.name} · ${w.p.speed.toFixed(2)}×`);
-    pill(txt, px, py + T / 2 + 2, slowed ? C['amber-tile'] : C.raised, C.ink, slowed ? C.amber : C['ink-2']);
-  }
-  const [rx, ry] = P(R.x + R.w / 2, R.y + R.d);
-  pill(small ? `queue ${q}` : `router · queue ${q}`, rx, ry + T / 2 + 4, thinking ? C['violet-tile'] : C.green, C.ink, C.ink);
 }
 
 // -------------------------------------------------------------------- chart
